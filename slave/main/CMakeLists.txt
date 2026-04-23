@@ -33,6 +33,13 @@ endif()
 
 if(CONFIG_ESP_HOSTED_CP_WIFI)
 	list(APPEND COMPONENT_SRCS "slave_wifi_std.c")
+	# HyperFi CSI passthrough hook (ADR-021 M2). Uses esp_hosted_send_custom_data
+	# (available in v2.12.x) to push wifi_csi_info_t payloads up to P4 host.
+	list(APPEND COMPONENT_SRCS "slave_csi_hook.c")
+	# HyperFi slave→host diagnostic channel (M2.9 fix — "做正确且难的事情").
+	# Produces text messages over Custom RPC event 0x2002 so host can observe
+	# slave internal state without a physical UART debug port in production.
+	list(APPEND COMPONENT_SRCS "slave_diag.c")
 endif()
 
 if(CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT)

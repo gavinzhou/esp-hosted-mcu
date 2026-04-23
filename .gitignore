@@ -3,3 +3,13 @@ dependencies.lock
 managed_components
 sdkconfig
 sdkconfig.old
+
+# HyperFi build artifacts & transient debug files
+slave/c5_fw_merged.bin
+slave/sdkconfig.broken
+slave/sdkconfig.old
+slave/sdkconfig.restored_from_old_not_working
+slave/build/
+slave/managed_components/
+slave/dependencies.lock
+.DS_Store

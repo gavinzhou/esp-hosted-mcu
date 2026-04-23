@@ -640,6 +640,17 @@ esp_err_t req_wifi_start(Rpc *req, Rpc *resp, void *priv_data)
 		}
 	}
 
+	/* HyperFi CSI hook (ADR-021 M2): register CSI callback that forwards each
+	 * frame to the P4 host via esp_hosted_send_custom_data. Safe to call after
+	 * esp_wifi_start(); the hook guards against double-init internally. */
+	{
+		extern esp_err_t slave_csi_hook_init(void);
+		esp_err_t hf_err = slave_csi_hook_init();
+		if (hf_err != ESP_OK) {
+			ESP_LOGW(TAG, "HyperFi CSI hook init failed: 0x%x (non-fatal)", hf_err);
+		}
+	}
+
 	return ESP_OK;
 }
 
