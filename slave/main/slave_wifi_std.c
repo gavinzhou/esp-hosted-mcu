@@ -640,16 +640,10 @@ esp_err_t req_wifi_start(Rpc *req, Rpc *resp, void *priv_data)
 		}
 	}
 
-	/* HyperFi CSI hook (ADR-021 M2): register CSI callback that forwards each
-	 * frame to the P4 host via esp_hosted_send_custom_data. Safe to call after
-	 * esp_wifi_start(); the hook guards against double-init internally. */
-	{
-		extern esp_err_t slave_csi_hook_init(void);
-		esp_err_t hf_err = slave_csi_hook_init();
-		if (hf_err != ESP_OK) {
-			ESP_LOGW(TAG, "HyperFi CSI hook init failed: 0x%x (non-fatal)", hf_err);
-		}
-	}
+	/* HyperFi CSI hook: was called here (post-esp_wifi_start) but
+	 * esp_wifi_set_csi(true) returned 0xffffffff at this stage because the
+	 * C5 RX path is not yet associated. Moved to WIFI_EVENT_STA_CONNECTED
+	 * handler below (search for HyperFi M2.9 deferred CSI init). */
 
 	return ESP_OK;
 }
@@ -2235,6 +2229,17 @@ static void event_handler_wifi(void* arg, esp_event_base_t event_base,
 			memcpy(&lkg_sta_connected_event, event_data, sizeof(wifi_event_sta_connected_t));
 			esp_wifi_internal_reg_rxcb(WIFI_IF_STA, (wifi_rxcb_t) wlan_sta_rx_callback);
 			station_connected = true;
+
+			/* HyperFi M2.9 deferred CSI init: esp_wifi_set_csi(true) returns
+			 * 0xffffffff when called before STA is associated. Now that we
+			 * have STA_CONNECTED, the RX path is ready — init CSI here. */
+			{
+				extern esp_err_t slave_csi_hook_init(void);
+				esp_err_t hf_err = slave_csi_hook_init();
+				if (hf_err != ESP_OK) {
+					ESP_LOGW(TAG, "HyperFi CSI hook init (post-connect) failed: 0x%x", hf_err);
+				}
+			}
 	} else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
 		ESP_LOGW(TAG,  "Sta mode disconnected");
 		bool reconnect_pending = false;

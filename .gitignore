@@ -13,3 +13,4 @@ slave/build/
 slave/managed_components/
 slave/dependencies.lock
 .DS_Store
+slave/c5_fw_fresh.bin

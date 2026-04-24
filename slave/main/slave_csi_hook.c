@@ -118,21 +118,25 @@ esp_err_t slave_csi_hook_init(void)
         return ESP_OK;
     }
 
-    /* CSI config — mirrors c5_rx_5g/main.c post-issue-#18493 fix */
-    wifi_csi_acquire_config_t csi_config = {
-        .enable                  = 1,
-        .acquire_csi_legacy      = 1,
-        .acquire_csi_force_lltf  = 1,  /* forces L-LTF demod path (12-bit CSI) */
-        .acquire_csi_ht20        = 1,
-        .acquire_csi_ht40        = 1,
-        .acquire_csi_su          = 1,
-        .acquire_csi_mu          = 1,
-        .acquire_csi_dcm         = 1,
-        .acquire_csi_beamformed  = 1,
-        .lltf_bit_mode           = 1,  /* L-LTF 12-bit precision (per QingzhaoYin) */
-        .val_scale_cfg           = 0,
-        .dump_ack_en             = 1,
-    };
+    /* Pre-check: what mode & PS state is slave wifi in right now? */
+    wifi_mode_t cur_mode = WIFI_MODE_NULL;
+    esp_err_t mode_err = esp_wifi_get_mode(&cur_mode);
+    hf_slave_diag("pre-CSI wifi_mode=%d (0=NULL 1=STA 2=AP 3=APSTA) err=0x%x",
+                  (int)cur_mode, mode_err);
+
+    wifi_ps_type_t cur_ps = WIFI_PS_NONE;
+    esp_err_t ps_get_err = esp_wifi_get_ps(&cur_ps);
+    hf_slave_diag("pre-CSI wifi_ps=%d (0=NONE 1=MIN 2=MAX) err=0x%x",
+                  (int)cur_ps, ps_get_err);
+
+    /* Disable power save before enabling CSI (CSI requires RX path always-on). */
+    esp_err_t ps_err = esp_wifi_set_ps(WIFI_PS_NONE);
+    hf_slave_diag("set_ps(NONE) err=0x%x", ps_err);
+
+    /* Mirror c5_rx_5g/main.c init sequence (known good on same C5 + IDF):
+     *   1) set_csi_rx_cb
+     *   2) set_csi(true)        ← enable CSI engine FIRST
+     *   3) set_csi_config(...)  ← THEN apply fine-grained config */
 
     esp_err_t err = esp_wifi_set_csi_rx_cb(hyperfi_csi_rx_cb, NULL);
     hf_slave_diag("set_csi_rx_cb err=0x%x", err);
@@ -141,18 +145,35 @@ esp_err_t slave_csi_hook_init(void)
         return err;
     }
 
-    err = esp_wifi_set_csi_config(&csi_config);
-    hf_slave_diag("set_csi_config err=0x%x", err);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "esp_wifi_set_csi_config failed: 0x%x (using defaults)", err);
-        /* non-fatal: defaults may still produce usable CSI */
-    }
-
     err = esp_wifi_set_csi(true);
     hf_slave_diag("set_csi(true) err=0x%x", err);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_wifi_set_csi(true) failed: 0x%x", err);
         return err;
+    }
+
+    /* Use wifi_csi_config_t (same as c5_rx_5g). On IDF v5.5-beta1-204 with
+     * lltf_bit_mode header patch, wifi_csi_config_t == wifi_csi_acquire_config_t. */
+    wifi_csi_config_t csi_config = {
+        .enable                  = 1,
+        .acquire_csi_legacy      = 1,
+        .acquire_csi_ht20        = 1,
+        .acquire_csi_ht40        = 1,
+        .acquire_csi_su          = 1,
+        .acquire_csi_mu          = 1,
+        .acquire_csi_dcm         = 1,
+        .acquire_csi_beamformed  = 1,
+        .acquire_csi_force_lltf  = 1,  /* force L-LTF demod path (12-bit CSI) */
+        .lltf_bit_mode           = 1,  /* L-LTF 12-bit precision (issue #18493) */
+        .val_scale_cfg           = 0,
+        .dump_ack_en             = 1,
+    };
+
+    err = esp_wifi_set_csi_config(&csi_config);
+    hf_slave_diag("set_csi_config err=0x%x", err);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_wifi_set_csi_config failed: 0x%x (using defaults)", err);
+        /* non-fatal: defaults may still produce usable CSI */
     }
 
     s_csi_hook_initialized = true;
