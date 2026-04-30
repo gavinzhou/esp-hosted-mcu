@@ -654,6 +654,18 @@ static esp_err_t sdio_push_data_to_queue(uint8_t * buf, uint32_t buf_len)
 #else // H_SDIO_HOST_STREAMING_MODE
 // SDIO streaming mode
 // return a buffer big enough to contain the data
+//
+// HyperFi TD-004 fix (2026-04-30): pre-allocate to MAX_SDIO_BUFFER_SIZE on
+// first call per buffer index, never reallocate. The original lazy-grow path
+// did free-then-malloc on every size change — this opened a window where
+// concurrent SDIO TX or HCI processing could grab the freed internal SRAM
+// (MEM_ALLOC = MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA, so PSRAM is excluded)
+// and starve the realloc → assert(*buf) fired under sustained TX/RX burst.
+// Repro on WT99P4C5-S1: event uploader (1.99 MB blob) + 304 fps CSI in
+// parallel for 25 minutes → assert at sdio_drv.c:674. With pre-allocation
+// each buffer holds MAX_SDIO_BUFFER_SIZE=1536 bytes (3 × ESP_BLOCK_SIZE),
+// covering any legal slave packet, and is never freed except in
+// bus_deinit_internal. Total internal SRAM cost = 2 × 1536 = 3 KB.
 static uint8_t * sdio_rx_get_buffer(uint32_t len)
 {
 #if H_SDIO_RX_BLOCK_ONLY_XFER
@@ -661,20 +673,23 @@ static uint8_t * sdio_rx_get_buffer(uint32_t len)
 	len = ((len + ESP_BLOCK_SIZE - 1) / ESP_BLOCK_SIZE) * ESP_BLOCK_SIZE;
 #endif
 
-	// (re)allocate a write buffer big enough to contain the data stream
 	int index = double_buf.write_index;
 	uint8_t ** buf = &double_buf.buffer[index].buf;
 
-	if (len > double_buf.buffer[index].buf_size) {
-		if (*buf) {
-			// free already allocated memory
-			g_h.funcs->_h_free(*buf);
-		}
-		*buf = (uint8_t *)MEM_ALLOC(len);
+	if (!*buf) {
+		// First-call pre-allocation. Failing here means there isn't enough
+		// internal SRAM at SDIO bring-up — that's a genuine boot OOM, not a
+		// load-induced race; assert is the right behavior.
+		*buf = (uint8_t *)MEM_ALLOC(MAX_SDIO_BUFFER_SIZE);
 		assert(*buf);
-		double_buf.buffer[index].buf_size = len;
-		ESP_LOGD(TAG, "buf %d size: %ld", index, double_buf.buffer[index].buf_size);
+		double_buf.buffer[index].buf_size = MAX_SDIO_BUFFER_SIZE;
+		ESP_LOGI(TAG, "double_buf[%d]: pre-allocated %d bytes @ %p (HyperFi TD-004)",
+				 index, MAX_SDIO_BUFFER_SIZE, *buf);
 	}
+
+	// len must fit in the pre-allocated buffer; this is a protocol invariant.
+	assert(len <= double_buf.buffer[index].buf_size);
+
 	return *buf;
 }
 
