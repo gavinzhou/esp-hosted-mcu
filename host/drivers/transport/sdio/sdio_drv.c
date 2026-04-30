@@ -655,17 +655,36 @@ static esp_err_t sdio_push_data_to_queue(uint8_t * buf, uint32_t buf_len)
 // SDIO streaming mode
 // return a buffer big enough to contain the data
 //
-// HyperFi TD-004 fix (2026-04-30): pre-allocate to MAX_SDIO_BUFFER_SIZE on
-// first call per buffer index, never reallocate. The original lazy-grow path
-// did free-then-malloc on every size change — this opened a window where
-// concurrent SDIO TX or HCI processing could grab the freed internal SRAM
-// (MEM_ALLOC = MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA, so PSRAM is excluded)
-// and starve the realloc → assert(*buf) fired under sustained TX/RX burst.
-// Repro on WT99P4C5-S1: event uploader (1.99 MB blob) + 304 fps CSI in
-// parallel for 25 minutes → assert at sdio_drv.c:674. With pre-allocation
-// each buffer holds MAX_SDIO_BUFFER_SIZE=1536 bytes (3 × ESP_BLOCK_SIZE),
-// covering any legal slave packet, and is never freed except in
-// bus_deinit_internal. Total internal SRAM cost = 2 × 1536 = 3 KB.
+// HyperFi TD-004 fix v2 (2026-04-30): two-part hardening of the original
+// lazy-grow path that asserted under sustained TX/RX burst.
+//
+// Bug history:
+//   v1 (8cb4854 baseline): free-then-malloc race window → assert(*buf) fired
+//     when concurrent SDIO TX / HCI grabbed the freed internal SRAM.
+//     Reproed at 25 min uptime with 6 alert events / 25 min (0.24 ev/min).
+//   v1.1 (c84bf84): pre-allocated MAX_SDIO_BUFFER_SIZE=1536 once per buffer
+//     index, no realloc. Wrong assumption — MAX_SDIO_BUFFER_SIZE is the
+//     packet-mode bound, but streaming mode can legitimately deliver larger
+//     bundled transfers (observed 3072 = 6×ESP_BLOCK_SIZE under burst with
+//     event_orch encoding 1.99 MB blob). New assert fired at 13 min uptime
+//     with 10 alerts / 6.5 min (1.54 ev/min, 6.4× more aggressive).
+//
+// v2 strategy:
+//   1. Pre-allocate HYPERFI_SDIO_RX_PREALLOC_SIZE (16 KB) on first use,
+//      covering observed bundling sizes with ample margin (3072 → 16384,
+//      5.3× headroom).
+//   2. If a larger packet ever arrives (rare), grow on demand BUT allocate
+//      new buffer BEFORE freeing old — this closes the v1 race entirely.
+//      Total internal-SRAM cost: 2 × 16 KB = 32 KB (P4 has 768 KB SRAM,
+//      ~4% — acceptable).
+//   3. Boot-time pre-alloc failure remains a fatal assert (genuine OOM).
+//      Runtime grow failure under heavy load returns NULL → caller's
+//      assert(rxbuff) at line 882 fires (separately tracked if seen).
+
+#ifndef HYPERFI_SDIO_RX_PREALLOC_SIZE
+#define HYPERFI_SDIO_RX_PREALLOC_SIZE  (16 * 1024)
+#endif
+
 static uint8_t * sdio_rx_get_buffer(uint32_t len)
 {
 #if H_SDIO_RX_BLOCK_ONLY_XFER
@@ -677,18 +696,32 @@ static uint8_t * sdio_rx_get_buffer(uint32_t len)
 	uint8_t ** buf = &double_buf.buffer[index].buf;
 
 	if (!*buf) {
-		// First-call pre-allocation. Failing here means there isn't enough
-		// internal SRAM at SDIO bring-up — that's a genuine boot OOM, not a
-		// load-induced race; assert is the right behavior.
-		*buf = (uint8_t *)MEM_ALLOC(MAX_SDIO_BUFFER_SIZE);
+		// First-call pre-allocation, generous size. Boot OOM → assert.
+		uint32_t init_size = (len > HYPERFI_SDIO_RX_PREALLOC_SIZE)
+			? len : HYPERFI_SDIO_RX_PREALLOC_SIZE;
+		*buf = (uint8_t *)MEM_ALLOC(init_size);
 		assert(*buf);
-		double_buf.buffer[index].buf_size = MAX_SDIO_BUFFER_SIZE;
-		ESP_LOGI(TAG, "double_buf[%d]: pre-allocated %d bytes @ %p (HyperFi TD-004)",
-				 index, MAX_SDIO_BUFFER_SIZE, *buf);
+		double_buf.buffer[index].buf_size = init_size;
+		ESP_LOGI(TAG, "double_buf[%d]: pre-allocated %ld bytes @ %p (HyperFi TD-004 v2)",
+				 index, init_size, *buf);
 	}
 
-	// len must fit in the pre-allocated buffer; this is a protocol invariant.
-	assert(len <= double_buf.buffer[index].buf_size);
+	if (len > double_buf.buffer[index].buf_size) {
+		// Rare grow path. Alloc new BEFORE free old — race-free.
+		uint8_t *new_buf = (uint8_t *)MEM_ALLOC(len);
+		if (!new_buf) {
+			ESP_LOGE(TAG,
+				"double_buf[%d]: grow failed (req %ld, have %ld) — returning NULL",
+				index, len, double_buf.buffer[index].buf_size);
+			return NULL;
+		}
+		g_h.funcs->_h_free(*buf);
+		*buf = new_buf;
+		double_buf.buffer[index].buf_size = len;
+		ESP_LOGW(TAG,
+			"double_buf[%d]: grown to %ld bytes (above prealloc %d, HyperFi TD-004 v2)",
+			index, len, HYPERFI_SDIO_RX_PREALLOC_SIZE);
+	}
 
 	return *buf;
 }
