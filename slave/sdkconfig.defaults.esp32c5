@@ -54,7 +54,13 @@ CONFIG_ESP_CACHE_MALLOC=y
 #---------------------
 # CONFIG_ESP_SDIO_NSEND_PSAMPLE=y
 # CONFIG_ESP_SDIO_DEFAULT_SPEED=y
-# CONFIG_ESP_SDIO_STREAMING_MODE=n
+# HyperFi TD-004 v3 (2026-05-01): packet mode (was =y, default streaming).
+# Pair to host CONFIG_ESP_HOSTED_SDIO_OPTIMIZATION_RX_NONE=y. See
+# esp-hosted-mcu#167 / #120 — streaming-mode unbounded backlog known
+# unstable. Host backlog → 991 KB grow → OOM panic was repro at uptime
+# 38 min on M3.7 host fork v2 patch. Switching to packet eliminates the
+# unbounded length problem (vendor sanity check at sdio_drv.c:248-254).
+# CONFIG_ESP_SDIO_STREAMING_MODE is not set
 
 
 # 8. Wifi config
